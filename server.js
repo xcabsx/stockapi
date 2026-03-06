@@ -144,6 +144,16 @@ function extractOptionGroupNamesFromXml(xml) {
     .filter(Boolean);
 }
 
+function extractProductPriceFromXml(xml) {
+  const blockMatch = xml.match(/<product>[\s\S]*?<\/product>/);
+  if (!blockMatch) return null;
+  const block = blockMatch[0];
+  const priceRaw = getXmlTagValue(block, "price");
+  if (!priceRaw) return null;
+  const price = Number(priceRaw);
+  return Number.isFinite(price) ? price : null;
+}
+
 function extractStockEntriesFromXml(xml) {
   const blocks = [...xml.matchAll(/<stock_available>[\s\S]*?<\/stock_available>/g)].map(
     (m) => m[0]
@@ -268,6 +278,11 @@ app.get("/stock", async (req, res) => {
 
     const combinations = extractCombinationsFromXml(combinationsXml);
 
+    const productXml = await psGet(
+      `/api/products?filter[id]=[${product.id}]&display=[id,price]&limit=1`
+    );
+    const productPrice = extractProductPriceFromXml(productXml);
+
     const attributeIds = [
       ...new Set(combinations.flatMap((combo) => combo.attribute_ids || [])),
     ];
@@ -320,6 +335,10 @@ app.get("/stock", async (req, res) => {
 
     const combinationsWithStock = combinations.map((combo) => {
       const quantity = stockByAttribute.get(combo.id) ?? 0;
+      const basePrice = Number.isFinite(productPrice) ? productPrice : null;
+      const finalPrice = Number.isFinite(basePrice)
+        ? basePrice + (combo.price_impact || 0)
+        : null;
       const attributes = (combo.attribute_ids || []).map((id) => {
         const name = attributeNames.get(id) || null;
         const groupId = attributeGroupByValueId.get(id) || null;
@@ -332,11 +351,17 @@ app.get("/stock", async (req, res) => {
       });
       return {
         ...combo,
+        base_price: basePrice,
+        final_price: Number.isFinite(finalPrice) ? finalPrice : null,
         quantity,
         available: quantity > 0,
         attributes,
       };
     });
+
+    const combinationsTotalQty = combinationsWithStock.length
+      ? combinationsWithStock.reduce((sum, combo) => sum + combo.quantity, 0)
+      : 0;
 
     const filteredCombinations = combinationsWithStock.filter((combo) => {
       if (variantTokens.length) {
@@ -381,7 +406,11 @@ app.get("/stock", async (req, res) => {
     const responseCombinations = hasFilters
       ? filteredCombinations
       : combinationsWithStock;
-    const responseTotalQty = hasFilters ? filteredTotalQty : totalQty;
+    const responseTotalQty = hasFilters
+      ? filteredTotalQty
+      : combinationsWithStock.length
+      ? combinationsTotalQty
+      : totalQty;
     const responseAvailable = responseTotalQty > 0;
 
     return res.json({
@@ -389,6 +418,7 @@ app.get("/stock", async (req, res) => {
       found: true,
       query,
       product,
+      productPrice,
       totalQty: responseTotalQty,
       available: responseAvailable,
       hasCombinations: combinationsWithStock.length > 0,
