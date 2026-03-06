@@ -1,6 +1,9 @@
 import express from "express";
 
 const app = express();
+const PRESTASHOP_INTERNAL_URL = process.env.PRESTASHOP_INTERNAL_URL;
+const PRESTASHOP_HOST_HEADER = process.env.PRESTASHOP_HOST_HEADER;
+const PRESTASHOP_WS_KEY = process.env.PRESTASHOP_WS_KEY;
 
 const PRESTASHOP_URL = process.env.PRESTASHOP_URL; // ej https://tienda.bg3d.com.ar
 const WS_KEY = process.env.PRESTASHOP_WS_KEY;      // tu key
@@ -10,11 +13,34 @@ if (!PRESTASHOP_URL || !WS_KEY) {
   console.error("Missing PRESTASHOP_URL or PRESTASHOP_WS_KEY");
 }
 
+
 function basicAuthHeader(key) {
   // PrestaShop Webservice usa Basic Auth: username = KEY, password vacío
   const token = Buffer.from(`${key}:`, "utf8").toString("base64");
   return `Basic ${token}`;
 }
+
+app.get("/prestashop-test", async (req, res) => {
+  try {
+    const url = `${PRESTASHOP_INTERNAL_URL}/api/products?display=[id,name]&limit=1`;
+
+    const response = await fetch(url, {
+      headers: {
+        Authorization: basicAuthHeader(PRESTASHOP_WS_KEY),
+        Host: PRESTASHOP_HOST_HEADER,
+      },
+    });
+
+    const text = await response.text();
+
+    res.status(response.status).send(text);
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
 
 async function psGet(path) {
   const url = `${PRESTASHOP_URL.replace(/\/$/, "")}${path}`;
