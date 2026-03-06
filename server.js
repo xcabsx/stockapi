@@ -5,12 +5,12 @@ const app = express();
 const PORT = Number(process.env.PORT || 3005);
 
 // PrestaShop interno por red Docker
-const PRESTASHOP_INTERNAL_URL =
-  process.env.PRESTASHOP_INTERNAL_URL || "http://ecommerce-dockerpresta-gxwcnf:80";
+const PRESTASHOP_URL =
+  process.env.PRESTASHOP_URL || "https://tienda.bg3d.com.ar";
+  
 
-// Dominio real que PrestaShop espera para no redirigir
-const PRESTASHOP_HOST_HEADER =
-  process.env.PRESTASHOP_HOST_HEADER || "tienda.bg3d.com.ar";
+
+
 
 // API key del Webservice
 const PRESTASHOP_WS_KEY = process.env.PRESTASHOP_WS_KEY;
@@ -25,13 +25,12 @@ function basicAuthHeader(key) {
 }
 
 async function psGet(path) {
-  const base = PRESTASHOP_INTERNAL_URL.replace(/\/$/, "");
+  const base = PRESTASHOP_URL.replace(/\/$/, "");
   const url = `${base}${path}`;
 
   const response = await fetch(url, {
     headers: {
       Authorization: basicAuthHeader(PRESTASHOP_WS_KEY),
-      Host: PRESTASHOP_HOST_HEADER,
     },
   });
 
