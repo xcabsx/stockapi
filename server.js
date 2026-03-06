@@ -370,21 +370,32 @@ app.get("/stock", async (req, res) => {
       return true;
     });
 
+    const hasVariantFilter = variantTokens.length > 0;
+    const hasAttrFilter = attrFilters.length > 0;
+    const hasFilters = hasVariantFilter || hasAttrFilter;
+
     const filteredTotalQty = filteredCombinations.length
       ? filteredCombinations.reduce((sum, combo) => sum + combo.quantity, 0)
       : 0;
+
+    const responseCombinations = hasFilters
+      ? filteredCombinations
+      : combinationsWithStock;
+    const responseTotalQty = hasFilters ? filteredTotalQty : totalQty;
+    const responseAvailable = responseTotalQty > 0;
 
     return res.json({
       ok: true,
       found: true,
       query,
       product,
-      totalQty,
-      available: totalQty > 0,
+      totalQty: responseTotalQty,
+      available: responseAvailable,
       hasCombinations: combinationsWithStock.length > 0,
-      combinations: filteredCombinations,
-      filteredTotalQty: variantTokens.length ? filteredTotalQty : undefined,
-      variant: variantTokens.length ? variant : undefined,
+      combinations: responseCombinations,
+      filteredTotalQty: hasFilters ? filteredTotalQty : undefined,
+      variant: hasVariantFilter ? variant : undefined,
+      attrs: hasAttrFilter ? attrsRaw : undefined,
       matches,
     });
   } catch (error) {
