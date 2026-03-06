@@ -60,7 +60,7 @@ function extractQuantitiesFromStockXml(xml) {
 
 function getXmlTagValue(block, tag) {
   const re = new RegExp(
-    `<${tag}>(?:<!\\[CDATA\\[(.*?)\\]\\]>|([^<]*))<\/${tag}>`
+    `<${tag}[^>]*>(?:<!\\[CDATA\\[(.*?)\\]\\]>|([^<]*))<\/${tag}>`
   );
   const match = block.match(re);
   return match ? String(match[1] || match[2] || "").trim() : "";
