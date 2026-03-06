@@ -58,6 +58,60 @@ function extractQuantitiesFromStockXml(xml) {
   );
 }
 
+function getXmlTagValue(block, tag) {
+  const re = new RegExp(
+    `<${tag}>(?:<!\\[CDATA\\[(.*?)\\]\\]>|([^<]*))<\/${tag}>`
+  );
+  const match = block.match(re);
+  return match ? String(match[1] || match[2] || "").trim() : "";
+}
+
+function extractCombinationsFromXml(xml) {
+  const blocks = [...xml.matchAll(/<combination>[\s\S]*?<\/combination>/g)].map(
+    (m) => m[0]
+  );
+
+  return blocks
+    .map((block) => {
+      const id = Number(getXmlTagValue(block, "id") || 0);
+      const idProduct = Number(getXmlTagValue(block, "id_product") || 0);
+      const reference = getXmlTagValue(block, "reference") || null;
+      const priceImpactRaw = getXmlTagValue(block, "price");
+      const priceImpact = priceImpactRaw ? Number(priceImpactRaw) : 0;
+
+      return {
+        id,
+        id_product: idProduct,
+        reference,
+        price_impact: Number.isFinite(priceImpact) ? priceImpact : 0,
+      };
+    })
+    .filter((c) => c.id);
+}
+
+function extractStockEntriesFromXml(xml) {
+  const blocks = [...xml.matchAll(/<stock_available>[\s\S]*?<\/stock_available>/g)].map(
+    (m) => m[0]
+  );
+
+  return blocks
+    .map((block) => {
+      const idProductAttribute = Number(
+        getXmlTagValue(block, "id_product_attribute") || 0
+      );
+      const quantityRaw = getXmlTagValue(block, "quantity");
+      const quantity = quantityRaw ? Number(quantityRaw) : 0;
+      const idProduct = Number(getXmlTagValue(block, "id_product") || 0);
+
+      return {
+        id_product: idProduct,
+        id_product_attribute: idProductAttribute,
+        quantity: Number.isFinite(quantity) ? quantity : 0,
+      };
+    })
+    .filter((entry) => entry.id_product || entry.id_product_attribute);
+}
+
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
@@ -74,9 +128,18 @@ app.get("/prestashop-test", async (_req, res) => {
   }
 });
 
+
 app.get("/stock", async (req, res) => {
   try {
-    const query = String(req.query.query || "").trim();
+    if (!PRESTASHOP_WS_KEY) {
+      return res.status(500).json({
+        ok: false,
+        error: "PRESTASHOP_WS_KEY not configured",
+      });
+    }
+
+    const query = String(req.query.query || "").trim().toLowerCase();
+    const tokens = query.split(/\s+/).filter(Boolean);
 
     if (!query) {
       return res.status(400).json({
@@ -85,16 +148,39 @@ app.get("/stock", async (req, res) => {
       });
     }
 
-    // Buscar productos por nombre
-    const productsXml = await psGet(
-      `/api/products?filter[name]=%25${encodeURIComponent(
-        query
-      )}%25&display=[id,name]&limit=5`
-    );
+    const PAGE_SIZE = 100;
+    const MAX_PAGES = 10;
+    const matches = [];
 
-    const ids = extractIdsFromProductsXml(productsXml);
+    for (let page = 0; page < MAX_PAGES; page += 1) {
+      const offset = page * PAGE_SIZE;
+      const productsXml = await psGet(
+        `/api/products?display=[id,name]&limit=${offset},${PAGE_SIZE}`
+      );
 
-    if (!ids.length) {
+      const productMatches = [
+        ...productsXml.matchAll(
+          /<product>[\s\S]*?<id><!\[CDATA\[(\d+)\]\]><\/id>[\s\S]*?<name><language[^>]*>(?:<!\[CDATA\[(.*?)\]\]>|([^<]*))<\/language><\/name>[\s\S]*?<\/product>/g
+        ),
+      ].map((m) => ({
+        id: Number(m[1]),
+        name: String(m[2] || m[3] || "").trim(),
+      }));
+
+      const pageMatches = productMatches.filter((p) => {
+        const name = p.name.toLowerCase();
+        if (!tokens.length) return false;
+        return tokens.every((token) => name.includes(token));
+      });
+
+      matches.push(...pageMatches);
+
+      if (productMatches.length < PAGE_SIZE) {
+        break;
+      }
+    }
+
+    if (!matches.length) {
       return res.json({
         ok: true,
         found: false,
@@ -103,26 +189,50 @@ app.get("/stock", async (req, res) => {
       });
     }
 
-    // Tomamos el primer producto encontrado
-    const idProduct = ids[0];
+    const exactMatch = matches.find((p) => {
+      const name = p.name.trim().toLowerCase();
+      return name === query;
+    });
+    const product = exactMatch || matches[0];
 
-    // Buscar stock para ese producto
-    const stockXml = await psGet(
-      `/api/stock_availables?filter[id_product]=[${idProduct}]&display=[id,id_product,id_product_attribute,quantity]&limit=50`
+    const combinationsXml = await psGet(
+      `/api/combinations?filter[id_product]=[${product.id}]&display=[id,id_product,reference,price]&limit=200`
     );
 
-    const quantities = extractQuantitiesFromStockXml(stockXml);
-    const totalQty = quantities.length
-      ? quantities.reduce((sum, qty) => sum + qty, 0)
+    const combinations = extractCombinationsFromXml(combinationsXml);
+
+    const stockXml = await psGet(
+      `/api/stock_availables?filter[id_product]=[${product.id}]&display=[id,id_product,id_product_attribute,quantity]&limit=200`
+    );
+
+    const stockEntries = extractStockEntriesFromXml(stockXml);
+    const stockByAttribute = new Map(
+      stockEntries.map((entry) => [entry.id_product_attribute, entry.quantity])
+    );
+
+    const totalQty = stockEntries.length
+      ? stockEntries.reduce((sum, entry) => sum + entry.quantity, 0)
       : 0;
+
+    const combinationsWithStock = combinations.map((combo) => {
+      const quantity = stockByAttribute.get(combo.id) ?? 0;
+      return {
+        ...combo,
+        quantity,
+        available: quantity > 0,
+      };
+    });
 
     return res.json({
       ok: true,
       found: true,
       query,
-      idProduct: Number(idProduct),
+      product,
       totalQty,
       available: totalQty > 0,
+      hasCombinations: combinationsWithStock.length > 0,
+      combinations: combinationsWithStock,
+      matches,
     });
   } catch (error) {
     return res.status(500).json({
