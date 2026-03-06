@@ -1,39 +1,73 @@
 import express from "express";
+import fetch from "node-fetch";
 
 const app = express();
-const PRESTASHOP_INTERNAL_URL = process.env.PRESTASHOP_INTERNAL_URL;
-const PRESTASHOP_HOST_HEADER = process.env.PRESTASHOP_HOST_HEADER;
-const PRESTASHOP_WS_KEY = process.env.PRESTASHOP_WS_KEY;
 
-const PRESTASHOP_URL = process.env.PRESTASHOP_URL; // ej https://tienda.bg3d.com.ar
-const WS_KEY = process.env.PRESTASHOP_WS_KEY;      // tu key
 const PORT = Number(process.env.PORT || 3005);
 
-if (!PRESTASHOP_URL || !WS_KEY) {
-  console.error("Missing PRESTASHOP_URL or PRESTASHOP_WS_KEY");
+// PrestaShop interno por red Docker
+const PRESTASHOP_INTERNAL_URL =
+  process.env.PRESTASHOP_INTERNAL_URL || "http://ecommerce-dockerpresta-gxwcnf:80";
+
+// Dominio real que PrestaShop espera para no redirigir
+const PRESTASHOP_HOST_HEADER =
+  process.env.PRESTASHOP_HOST_HEADER || "tienda.bg3d.com.ar";
+
+// API key del Webservice
+const PRESTASHOP_WS_KEY = process.env.PRESTASHOP_WS_KEY;
+
+if (!PRESTASHOP_WS_KEY) {
+  console.error("Missing PRESTASHOP_WS_KEY");
 }
 
-
 function basicAuthHeader(key) {
-  // PrestaShop Webservice usa Basic Auth: username = KEY, password vacío
   const token = Buffer.from(`${key}:`, "utf8").toString("base64");
   return `Basic ${token}`;
 }
 
-app.get("/prestashop-test", async (req, res) => {
+async function psGet(path) {
+  const base = PRESTASHOP_INTERNAL_URL.replace(/\/$/, "");
+  const url = `${base}${path}`;
+
+  const response = await fetch(url, {
+    headers: {
+      Authorization: basicAuthHeader(PRESTASHOP_WS_KEY),
+      Host: PRESTASHOP_HOST_HEADER,
+    },
+  });
+
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`PrestaShop ${response.status}: ${text.slice(0, 500)}`);
+  }
+
+  return text;
+}
+
+function extractIdsFromProductsXml(xml) {
+  const matches = [
+    ...xml.matchAll(/<id><!\[CDATA\[(\d+)\]\]><\/id>/g),
+    ...xml.matchAll(/<id>(\d+)<\/id>/g),
+  ];
+
+  return matches.map((m) => m[1]).filter(Boolean);
+}
+
+function extractQuantitiesFromStockXml(xml) {
+  return [...xml.matchAll(/<quantity>(-?\d+)<\/quantity>/g)].map((m) =>
+    Number(m[1])
+  );
+}
+
+app.get("/health", (_req, res) => {
+  res.json({ ok: true });
+});
+
+app.get("/prestashop-test", async (_req, res) => {
   try {
-    const url = `${PRESTASHOP_INTERNAL_URL}/api/products?display=[id,name]&limit=1`;
-
-    const response = await fetch(url, {
-      headers: {
-        Authorization: basicAuthHeader(PRESTASHOP_WS_KEY),
-        Host: PRESTASHOP_HOST_HEADER,
-      },
-    });
-
-    const text = await response.text();
-
-    res.status(response.status).send(text);
+    const xml = await psGet("/api/products?display=[id,name]&limit=1");
+    res.status(200).type("application/xml").send(xml);
   } catch (error) {
     res.status(500).json({
       ok: false,
@@ -42,69 +76,64 @@ app.get("/prestashop-test", async (req, res) => {
   }
 });
 
-async function psGet(path) {
-  const url = `${PRESTASHOP_URL.replace(/\/$/, "")}${path}`;
-  const res = await fetch(url, {
-    headers: { Authorization: basicAuthHeader(WS_KEY) }
-  });
-  const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`PrestaShop ${res.status}: ${text.slice(0, 300)}`);
-  }
-  return text;
-}
-
-function parseQtyFromXml(xml) {
-  // busca <quantity>123</quantity>
-  const m = xml.match(/<quantity>(-?\d+)<\/quantity>/);
-  return m ? Number(m[1]) : null;
-}
-
-app.get("/health", (_req, res) => res.json({ ok: true }));
-
 app.get("/stock", async (req, res) => {
   try {
-    const q = String(req.query.query || "").trim();
-    if (!q) return res.status(400).json({ error: "query required" });
+    const query = String(req.query.query || "").trim();
 
-    // 1) Buscar producto por nombre (simple y práctico para la prueba)
-    // output_format=JSON a veces funciona según config; si no, cae a XML.
-    // Vamos a pedir XML y parsear ID.
-    const productsXml = await psGet(
-      `/api/products?filter[name]=%25${encodeURIComponent(q)}%25&display=[id,name]&limit=5`
-    );
-
-    const ids = [...productsXml.matchAll(/<id><!\[CDATA\[(\d+)\]\]><\/id>|<id>(\d+)<\/id>/g)]
-      .map(m => m[1] || m[2])
-      .filter(Boolean);
-
-    if (!ids.length) {
-      return res.json({ found: false, query: q, matches: [] });
+    if (!query) {
+      return res.status(400).json({
+        ok: false,
+        error: "query required",
+      });
     }
 
-    // 2) Tomar el primer match y consultar stock_availables
-    // En PrestaShop, el stock suele estar en stock_availables filtrando por id_product
-    const idProduct = ids[0];
-    const stockXml = await psGet(
-      `/api/stock_availables?filter[id_product]=[${idProduct}]&display=[id,quantity,id_product_attribute]&limit=50`
+    // Buscar productos por nombre
+    const productsXml = await psGet(
+      `/api/products?filter[name]=%25${encodeURIComponent(
+        query
+      )}%25&display=[id,name]&limit=5`
     );
 
-    // Si hay combinaciones, devuelve varias filas (id_product_attribute != 0).
-    // Sumamos quantities.
-    const qtyMatches = [...stockXml.matchAll(/<quantity>(-?\d+)<\/quantity>/g)].map(m => Number(m[1]));
-    const total = qtyMatches.length ? qtyMatches.reduce((a,b)=>a+b,0) : null;
+    const ids = extractIdsFromProductsXml(productsXml);
+
+    if (!ids.length) {
+      return res.json({
+        ok: true,
+        found: false,
+        query,
+        matches: [],
+      });
+    }
+
+    // Tomamos el primer producto encontrado
+    const idProduct = ids[0];
+
+    // Buscar stock para ese producto
+    const stockXml = await psGet(
+      `/api/stock_availables?filter[id_product]=[${idProduct}]&display=[id,id_product,id_product_attribute,quantity]&limit=50`
+    );
+
+    const quantities = extractQuantitiesFromStockXml(stockXml);
+    const totalQty = quantities.length
+      ? quantities.reduce((sum, qty) => sum + qty, 0)
+      : 0;
 
     return res.json({
+      ok: true,
       found: true,
-      query: q,
+      query,
       idProduct: Number(idProduct),
-      totalQty: total ?? 0
+      totalQty,
+      available: totalQty > 0,
     });
-  } catch (e) {
-    return res.status(500).json({ error: String(e.message || e) });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: String(error.message || error),
+    });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`stock-api listening on ${PORT}`);
+  console.log(`bg3d backend listening on port ${PORT}`);
 });
